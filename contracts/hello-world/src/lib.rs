@@ -1,34 +1,43 @@
+#![allow(non_snake_case)]
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, Env, Symbol, String, contracttype, log};
-use soroban_sdk::{contract, contractimpl, Env, Symbol, String, contracttype, log};
+use soroban_sdk::{contract, contractimpl, Env, Symbol, contracttype, log, symbol_short, String}; // Import String here
 
-// The contract for managing asset leasing on the Stellar blockchain
-
+// Structure to store information about the lease
 #[contracttype]
 #[derive(Clone)]
-pub struct LeaseAgreement {
-    pub asset_id: u64,
-    pub lessee: String,
-    pub lessor: String,
-    pub lease_start: u64,
-    pub lease_end: u64,
-    pub lease_payment: u64,
-    pub is_active: bool,
+pub struct Lease {
+    pub lease_id: u64,        // Unique ID for each lease
+    pub asset_id: u64,        // Asset ID being leased
+    pub owner: String,        // Asset owner's Stellar account ID
+    pub lessee: String,       // Lessee's Stellar account ID
+    pub start_time: u64,      // Lease start time
+    pub end_time: u64,        // Lease end time
+    pub payment_amount: u64,  // Payment amount in Lumens (XLM)
+    pub is_active: bool,      // Whether the lease is active or expired
 }
 
+// Structure to track all leases status (approved, pending, and expired)
 #[contracttype]
 #[derive(Clone)]
-pub struct Asset {
-    pub asset_id: u64,
-    pub asset_owner: String,
-    pub asset_type: String,
-    pub asset_description: String,
-    pub is_available: bool,
+pub struct LeaseStatus {
+    pub active: u64,          // Count of active leases
+    pub completed: u64,       // Count of completed leases
+    pub expired: u64,         // Count of expired leases
+    pub total: u64,           // Total number of leases created
 }
 
-const ASSET_BOOK: Symbol = symbol!("asset_book");
-const LEASE_BOOK: Symbol = symbol!("lease_book");
+// For referencing LeaseStatus
+const ALL_LEASES: Symbol = symbol_short!("ALL_LES");  // Shorten symbol name to 9 characters
+
+// For creating unique lease IDs
+const LEASE_COUNT: Symbol = symbol_short!("LEA_CNT");  // Shorten symbol name to 9 characters
+
+// Enum for storing lease details in a map
+#[contracttype]
+pub enum LeaseBook {
+    Lease(u64),
+}
 
 #[contract]
 pub struct LandRegistryContract;
@@ -36,100 +45,111 @@ pub struct LandRegistryContract;
 #[contractimpl]
 impl LandRegistryContract {
 
-    // Create a new asset listing
-    pub fn create_asset(env: Env, asset_id: u64, owner: String, asset_type: String, asset_description: String) {
-        let asset = Asset {
+    // Function to create a new lease
+    pub fn create_lease(env: Env, asset_id: u64, owner: String, lessee: String, start_time: u64, end_time: u64, payment_amount: u64) -> u64 {
+        let mut lease_count: u64 = env.storage().instance().get(&LEASE_COUNT).unwrap_or(0);
+        lease_count += 1;
+
+        // Create a new lease instance
+        let new_lease = Lease {
+            lease_id: lease_count,
             asset_id,
-            asset_owner: owner,
-            asset_type,
-            asset_description,
-            is_available: true,
+            owner,
+            lessee,
+            start_time,
+            end_time,
+            payment_amount,
+            is_active: true,
         };
 
-        env.storage().instance().set(&ASSET_BOOK, &asset);
-        log!(&env, "Asset Created with Asset ID: {}", asset_id);
+        // Update LeaseStatus data
+        let mut all_leases = Self::view_all_lease_status(env.clone());
+        all_leases.total += 1;
+        all_leases.active += 1;
+
+        // Store new lease data
+        env.storage().instance().set(&LeaseBook::Lease(lease_count), &new_lease);
+        env.storage().instance().set(&ALL_LEASES, &all_leases);
+        env.storage().instance().set(&LEASE_COUNT, &lease_count);
+
+        log!(&env, "Lease Created with Lease-ID: {}", new_lease.lease_id);
+
+        lease_count  // Return the unique lease ID
     }
 
-    // Create a lease agreement for an asset
-    pub fn create_lease(env: Env, asset_id: u64, lessee: String, lease_start: u64, lease_end: u64, lease_payment: u64) -> bool {
-        let asset_key = ASSET_BOOK;
-        let mut asset = env.storage().instance().get(&asset_key).unwrap_or(Asset {
-            asset_id: 0,
-            asset_owner: String::from_str(&env, "Not Found"),
-            asset_type: String::from_str(&env, "Not Found"),
-            asset_description: String::from_str(&env, "Not Found"),
-            is_available: false,
-        });
-
-        if asset.is_available {
-            // Mark the asset as unavailable for lease
-            asset.is_available = false;
-            env.storage().instance().set(&asset_key, &asset);
-
-            // Create the lease agreement
-            let lease = LeaseAgreement {
-                asset_id,
-                lessee,
-                lessor: asset.asset_owner.clone(),
-                lease_start,
-                lease_end,
-                lease_payment,
-                is_active: true,
-            };
-
-            // Store the lease agreement
-            env.storage().instance().set(&LEASE_BOOK, &lease);
-            log!(&env, "Lease Created for Asset ID: {}", asset_id);
-            return true;
-        }
-
-        false
-    }
-
-    // Complete a lease and return the asset
-    pub fn complete_lease(env: Env, asset_id: u64) {
-        let lease_key = LEASE_BOOK;
-        let mut lease = env.storage().instance().get(&lease_key).unwrap_or(LeaseAgreement {
-            asset_id: 0,
-            lessee: String::from_str(&env, "Not Found"),
-            lessor: String::from_str(&env, "Not Found"),
-            lease_start: 0,
-            lease_end: 0,
-            lease_payment: 0,
-            is_active: false,
-        });
-
+    // Function to complete a lease (mark as completed)
+    pub fn complete_lease(env: Env, lease_id: u64) {
+        // Retrieve lease details
+        let mut lease = Self::view_lease(env.clone(), lease_id);
+        
+        // If the lease is still active, complete it
         if lease.is_active {
-            // Mark lease as completed
             lease.is_active = false;
-            env.storage().instance().set(&lease_key, &lease);
+            
+            // Update LeaseStatus data
+            let mut all_leases = Self::view_all_lease_status(env.clone());
+            all_leases.active -= 1;
+            all_leases.completed += 1;
 
-            // Retrieve and update the asset status
-            let asset_key = ASSET_BOOK;
-            let mut asset = env.storage().instance().get(&asset_key).unwrap_or(Asset {
-                asset_id: 0,
-                asset_owner: String::from_str(&env, "Not Found"),
-                asset_type: String::from_str(&env, "Not Found"),
-                asset_description: String::from_str(&env, "Not Found"),
-                is_available: false,
-            });
+            // Store updated lease data
+            env.storage().instance().set(&LeaseBook::Lease(lease_id), &lease);
+            env.storage().instance().set(&ALL_LEASES, &all_leases);
 
-            asset.is_available = true; // Mark the asset as available again
-            env.storage().instance().set(&asset_key, &asset);
-
-            log!(&env, "Lease Completed and Asset ID: {} is now available", asset_id);
+            log!(&env, "Lease-ID: {}, has been completed", lease_id);
+        } else {
+            log!(&env, "Lease-ID: {}, is already completed or expired", lease_id);
+            // Instead of panicking, it might be better to log and exit gracefully
+            return;
         }
     }
 
-    // View the current status of a lease
-    pub fn view_lease(env: Env, asset_id: u64) -> LeaseAgreement {
-        env.storage().instance().get(&LEASE_BOOK).unwrap_or(LeaseAgreement {
+    // Function to expire a lease (mark as expired)
+    pub fn expire_lease(env: Env, lease_id: u64) {
+        // Retrieve lease details
+        let mut lease = Self::view_lease(env.clone(), lease_id);
+        
+        // If the lease is still active, expire it
+        if lease.is_active {
+            lease.is_active = false;
+            
+            // Update LeaseStatus data
+            let mut all_leases = Self::view_all_lease_status(env.clone());
+            all_leases.active -= 1;
+            all_leases.expired += 1;
+
+            // Store updated lease data
+            env.storage().instance().set(&LeaseBook::Lease(lease_id), &lease);
+            env.storage().instance().set(&ALL_LEASES, &all_leases);
+
+            log!(&env, "Lease-ID: {}, has been expired", lease_id);
+        } else {
+            log!(&env, "Lease-ID: {}, is already expired or completed", lease_id);
+            // Instead of panicking, it might be better to log and exit gracefully
+            return;
+        }
+    }
+
+    // Function to view the status of all leases
+    pub fn view_all_lease_status(env: Env) -> LeaseStatus {
+        env.storage().instance().get(&ALL_LEASES).unwrap_or_else(|| LeaseStatus {
+            active: 0,
+            completed: 0,
+            expired: 0,
+            total: 0,
+        })
+    }
+
+    // Function to view details of a specific lease by lease ID
+    pub fn view_lease(env: Env, lease_id: u64) -> Lease {
+        let key = LeaseBook::Lease(lease_id);
+        env.storage().instance().get(&key).unwrap_or_else(|| Lease {
+            lease_id: 0,
             asset_id: 0,
-            lessee: String::from_str(&env, "Not Found"),
-            lessor: String::from_str(&env, "Not Found"),
-            lease_start: 0,
-            lease_end: 0,
-            lease_payment: 0,
+            owner: String::from_str(&env, "Not_Found"),
+            lessee: String::from_str(&env, "Not_Found"),
+            start_time: 0,
+            end_time: 0,
+            payment_amount: 0,
             is_active: false,
         })
     }
